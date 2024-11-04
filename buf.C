@@ -63,21 +63,157 @@ BufMgr::~BufMgr() {
 }
 
 
-const Status BufMgr::allocBuf(int & frame) {
+const Status BufMgr::allocBuf(int &frame) {
+
+    int numPinnedPages = 0;
+
+    while (true) {
+        // If all buffers are currently pinned i.e.
+        // in use, we cannot currently allocate and our
+        // buffer is exceeded.
+        if (numBufs == numPinnedPages) {
+            return BUFFEREXCEEDED;
+        }
+
+        // Advance clock hand
+        advanceClock();
+
+        BufDesc* curBuffer = &bufTable[clockHand];
+        Page* curPage = &bufPool[clockHand];
+
+        // First check if at an invalid buffer, can immediately use it
+        // (Clock LRU replacement algorithm)
+        if (!curBuffer->valid) {
+            frame = curBuffer->frameNo;
+            curBuffer->Clear();
+            return OK;
+        } else if (curBuffer->refbit) {
+            curBuffer->refbit = 0;
+            continue;
+        }
+
+        // If this page is pinned, it is not eligble to be replaced
+        if (curBuffer->pinCnt > 0) {
+            numPinnedPages++;
+            continue;
+        }
+
+        // If it is dirty, it's fine, but we have to write it to file first.
+        if (curBuffer->dirty) {
+            Status ret = curBuffer->file->writePage(curBuffer->pageNo, curPage);
+            if (ret != OK) {
+                return UNIXERR;
+            }
+            curBuffer->dirty = true;
+        }
+
+        // This buffer is now available, we can now allocate it
+        // Remove old entry from hashtable
+        Status ret = hashTable->remove(curBuffer->file, curBuffer->pageNo);
+        if (ret != OK) {
+            return ret;
+        } else {
+            // Allocate curBuffer
+            curBuffer->Clear();
+            frame = curBuffer->frameNo;
+            return OK;
+        }
+    }
+}
+
+const Status BufMgr::readPage(File* file, const int pageNo, Page*& page) {
+    int frame;
+    Status getRet = hashTable->lookup(file, pageNo, frame);
+    if (getRet == HASHNOTFOUND) {
+        // Doesn't exist
+        int frame;
+        Status allocBufRet = allocBuf(frame);
+        if (allocBufRet != OK) {
+            return allocBufRet;
+        }
+
+        // Load page into memory
+        Status readRet = file->readPage(pageNo, &bufPool[frame]);
+        if (readRet != OK) {
+            disposePage(file, pageNo);
+            return readRet;
+        }
+        page = &bufPool[frame];
+
+        // Insert this into hashTable
+        Status insertRet = hashTable->insert(file, pageNo, frame);
+        if (insertRet != OK) {
+            return insertRet;
+        }
+
+        // Set() the buffer
+        BufDesc *curBuffer = &bufTable[frame];
+        curBuffer->Set(file, pageNo);
+        curBuffer->frameNo = frame;
+
+    } else if (getRet == HASHTBLERROR) {
+        return HASHTBLERROR;
+    } else {
+        BufDesc *curBuffer = &bufTable[frame];
+
+        curBuffer->refbit = true;
+        curBuffer->pinCnt++;
+
+        page = &bufPool[frame];
+    }
+
     return OK;
 }
 
-	
-const Status BufMgr::readPage(File* file, const int PageNo, Page*& page) {
-    return OK;
-}
+const Status BufMgr::unPinPage(File* file, const int pageNo, const bool dirty) {
+    // First get the corresponding frame number
+    int frame;
+    Status getRet = hashTable->lookup(file, pageNo, frame);
+    if (getRet != OK) {
+        return getRet;
+    }
 
+    // Get the actual buffer
+    BufDesc *curBuffer = &bufTable[frame];
+    // Check if it is already unpinned
+    if (!curBuffer->pinCnt) {
+        return PAGENOTPINNED;
+    }
+    // If not, decrement its pincount and mark it as dirty if dirty
+    if (dirty)
+        curBuffer->dirty = true;
+    curBuffer->pinCnt--;
 
-const Status BufMgr::unPinPage(File* file, const int PageNo, const bool dirty) {
     return OK;
 }
 
 const Status BufMgr::allocPage(File* file, int& pageNo, Page*& page) {
+    // Allocate our page
+    int pageNum;
+    Status allocPageRet = file->allocatePage(pageNum);
+    if (allocPageRet != OK) {
+        return allocPageRet;
+    }
+
+    // Allocate the frame
+    int frame;
+    Status allocBufRet = allocBuf(frame);
+    if (allocBufRet != OK) {
+        return allocBufRet;
+    }
+
+    // Insert (file, pageNum) -> frame mapping
+    Status insertRet = hashTable->insert(file, pageNum, frame);
+    if (insertRet != OK) {
+        return insertRet;
+    }
+
+    // Now we can Set()
+    BufDesc *curBuffer = &bufTable[frame];
+    pageNo = pageNum;
+    curBuffer->Set(file, pageNum);
+    page = &bufPool[frame];
+
     return OK;
 }
 
@@ -85,7 +221,7 @@ const Status BufMgr::disposePage(File* file, const int pageNo)
 {
     // see if it is in the buffer pool
     Status status = OK;
-    int frameNo = 0;
+    int frameNo = false;
     status = hashTable->lookup(file, pageNo, frameNo);
     if (status == OK)
     {
