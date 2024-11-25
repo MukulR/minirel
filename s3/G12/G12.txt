@@ -1,0 +1,8 @@
+Mukul Rao <mgrao2@wisc.edu>
+Pranav Jayabalan <pjayabalan@wisc.edu>
+Joshua Han <jhan294@wisc.edu>
+
+
+We met together in the library and worked on all four functions together. 
+We believe that everyone had equal involvement and contribution in the design, debugging, and coding of our solution.
+We did one function at a time and discussed what each would need to do as well as debugging things using GDB.
